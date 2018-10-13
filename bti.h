@@ -18,7 +18,6 @@
 
 enum host {
 	HOST_TWITTER  = 0,
-	HOST_IDENTICA = 1,
 	HOST_CUSTOM   = 2
 };
 
@@ -28,7 +27,6 @@ enum action {
 	ACTION_USER    = 2,
 	ACTION_REPLIES = 4,
 	ACTION_PUBLIC  = 8,
-	ACTION_GROUP   = 16,
 	ACTION_RETWEET = 32,
 	ACTION_DIRECT  = 64,
 	ACTION_UNKNOWN = 128
@@ -47,7 +45,6 @@ struct session {
 	char *homedir;
 	char *logfile;
 	char *user;
-	char *group;
 	char *hosturl;
 	char *hostname;
 	char *configfile;
@@ -77,9 +74,7 @@ struct bti_curl_buffer {
 };
 
 extern const char twitter_host[];
-extern const char identica_host[];
 extern const char twitter_name[];
-extern const char identica_name[];
 extern int debug;
 
 extern void bti_parse_configfile(struct session *session);

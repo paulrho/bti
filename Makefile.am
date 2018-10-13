@@ -12,12 +12,14 @@ bti_SOURCES = \
 bti_CFLAGS = \
 	$(LIBCURL_CFLAGS) \
 	$(XML_CFLAGS) \
+	$(JSON_CFLAGS) \
 	$(LIBPCRE_CFLAGS) \
 	$(LIBOAUTH_CFLAGS)
 
 bti_LDADD = \
 	$(LIBCURL_LIBS) \
 	$(XML_LIBS) \
+	$(JSON_LIBS) \
 	$(LIBPCRE_LIBS) \
 	$(LIBOAUTH_LIBS)
 
@@ -25,11 +27,13 @@ dist_man_MANS = \
 	bti.1 \
 	bti-shrink-urls.1
 
+bashcompdir = @bashcompdir@
+dist_bashcomp_DATA = bti-bashcompletion
+
 EXTRA_DIST = \
 	bti.xml \
 	bti-shrink-urls.xml \
 	bti.example \
-	bti-bashcompletion \
 	RELEASE-NOTES \
 	bti-shrink-urls
 
@@ -44,6 +48,13 @@ git-clean:
 
 distclean-local:
 	rm -rf autom4te.cache
+
+install-data-hook:
+	mv $(DESTDIR)$(bashcompdir)/bti-bashcompletion \
+	   $(DESTDIR)$(bashcompdir)/bti
+
+uninstall-hook:
+	$(RM) $(DESTDIR)$(bashcompdir)/bti
 
 PREVIOUS_VERSION = 0`expr $(VERSION) - 1`
 

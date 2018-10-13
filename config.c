@@ -223,10 +223,6 @@ static int host_callback(struct session *session, char *value)
 		session->host = HOST_TWITTER;
 		session->hosturl = strdup(twitter_host);
 		session->hostname = strdup(twitter_name);
-	} else if (strcasecmp(value, "identica") == 0) {
-		session->host = HOST_IDENTICA;
-		session->hosturl = strdup(identica_host);
-		session->hostname = strdup(identica_name);
 	} else {
 		session->host = HOST_CUSTOM;
 		session->hosturl = strdup(value);
@@ -247,8 +243,6 @@ static int action_callback(struct session *session, char *value)
 		session->action = ACTION_REPLIES;
 	else if (strcasecmp(value, "public") == 0)
 		session->action = ACTION_PUBLIC;
-	else if (strcasecmp(value, "group") == 0)
-		session->action = ACTION_GROUP;
 	else
 		session->action = ACTION_UNKNOWN;
 	return 0;

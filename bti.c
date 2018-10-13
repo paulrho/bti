@@ -32,6 +32,7 @@
 #include <libxml/xmlmemory.h>
 #include <libxml/parser.h>
 #include <libxml/tree.h>
+#include <json-c/json.h>
 #include <pcre.h>
 #include <termios.h>
 #include <dlfcn.h>
@@ -52,7 +53,7 @@ int debug;
 
 static void display_help(void)
 {
-	fprintf(stdout, "bti - send tweet to twitter or identi.ca\n"
+	fprintf(stdout, "bti - send tweet to twitter\n"
 		"Version: %s\n"
 		"Usage:\n"
 		"  bti [options]\n"
@@ -62,7 +63,6 @@ static void display_help(void)
 		"  --action action\n"
 		"    ('update', 'friends', 'public', 'replies', 'user', or 'direct')\n"
 		"  --user screenname\n"
-		"  --group groupname\n"
 		"  --proxy PROXY:PORT\n"
 		"  --host HOST\n"
 		"  --logfile logfile\n"
@@ -222,7 +222,6 @@ static void session_free(struct session *session)
 	free(session->time);
 	free(session->homedir);
 	free(session->user);
-	free(session->group);
 	free(session->hosturl);
 	free(session->hostname);
 	free(session->configfile);
@@ -257,31 +256,27 @@ static void bti_curl_buffer_free(struct bti_curl_buffer *buffer)
 	free(buffer);
 }
 
-const char twitter_host[]  = "http://api.twitter.com/1/statuses";
-const char twitter_host_simple[]  = "http://api.twitter.com/1";
-const char identica_host[] = "https://identi.ca/api/statuses";
+const char twitter_host[]  = "https://api.twitter.com/1.1/statuses";
+const char twitter_host_stream[]  = "https://stream.twitter.com/1.1/statuses"; /*this is not reset, and doesnt work */
+const char twitter_host_simple[]  = "https://api.twitter.com/1.1";
 const char twitter_name[]  = "twitter";
-const char identica_name[] = "identi.ca";
 
-static const char twitter_request_token_uri[]  = "http://twitter.com/oauth/request_token";
-static const char twitter_access_token_uri[]   = "http://twitter.com/oauth/access_token";
-static const char twitter_authorize_uri[]      = "http://twitter.com/oauth/authorize?oauth_token=";
-static const char identica_request_token_uri[] = "https://identi.ca/api/oauth/request_token?oauth_callback=oob";
-static const char identica_access_token_uri[]  = "https://identi.ca/api/oauth/access_token";
-static const char identica_authorize_uri[]     = "https://identi.ca/api/oauth/authorize?oauth_token=";
+static const char twitter_request_token_uri[]  = "https://twitter.com/oauth/request_token?oauth_callback=oob";
+static const char twitter_access_token_uri[]   = "https://twitter.com/oauth/access_token";
+static const char twitter_authorize_uri[]      = "https://twitter.com/oauth/authorize?oauth_token=";
 static const char custom_request_token_uri[]   = "/../oauth/request_token?oauth_callback=oob";
 static const char custom_access_token_uri[]    = "/../oauth/access_token";
 static const char custom_authorize_uri[]       = "/../oauth/authorize?oauth_token=";
 
-static const char user_uri[]     = "/user_timeline/";
-static const char update_uri[]   = "/update.xml";
-static const char public_uri[]   = "/public_timeline.xml";
-static const char friends_uri[]  = "/friends_timeline.xml";
-static const char mentions_uri[] = "/mentions.xml";
+static const char user_uri[]     = "/user_timeline.json";
+static const char update_uri[]   = "/update.json";
+static const char public_uri[]   = "/sample.json";
+static const char friends_uri[]  = "/home_timeline.json";
+static const char mentions_uri[] = "/mentions_timeline.json";
 static const char replies_uri[]  = "/replies.xml";
 static const char retweet_uri[]  = "/retweet/";
-static const char group_uri[]    = "/../statusnet/groups/timeline/";
-static const char direct_uri[]   = "/direct_messages/new.xml";
+/*static const char direct_uri[]   = "/direct_messages/new.xml";*/
+static const char direct_uri[]   = "/direct_messages/new.json";
 
 static const char config_default[]	= "/etc/bti";
 static const char config_xdg_default[] = ".config/bti";
@@ -449,60 +444,269 @@ static void parse_timeline(char *document, struct session *session)
 	return;
 }
 
-static int parse_response(char *document, struct session *session)
+
+/* avoids the c99 option */
+#define json_object_object_foreach_alt(obj,key,val)		\
+	char *key;						\
+	struct json_object *val;				\
+	struct lh_entry *entry;					\
+	for (entry = json_object_get_object(obj)->head;		\
+		({ if(entry && !is_error(entry)) {		\
+			key = (char*)entry->k;			\
+			val = (struct json_object*)entry->v;	\
+		} ; entry; });					\
+		entry = entry->next )
+
+
+/* Forward Declaration */
+static void json_parse(json_object * jobj, int nestlevel);
+
+static void print_json_value(json_object *jobj, int nestlevel)
 {
-	xmlDocPtr doc;
-	xmlNodePtr current;
+	enum json_type type;
 
-	doc = xmlReadMemory(document, strlen(document),
-				"response.xml", NULL,
-				XML_PARSE_NOERROR);
-	if (doc == NULL)
-		return -EREMOTEIO;
+	type = json_object_get_type(jobj);
+	switch (type) {
+	case json_type_boolean:
+		printf("boolean   ");
+		printf("value: %s\n", json_object_get_boolean(jobj)? "true": "false");
+		break;
+	case json_type_double:
+		printf("double    ");
+		printf("value: %lf\n", json_object_get_double(jobj));
+		break;
+	case json_type_int:
+		printf("int       ");
+		printf("value: %d\n", json_object_get_int(jobj));
+		break;
+	case json_type_string:
+		printf("string    ");
+		printf("value: %s\n", json_object_get_string(jobj));
+		break;
+	default:
+		break;
+	}
+}
 
-	current = xmlDocGetRootElement(doc);
-	if (current == NULL) {
-		fprintf(stderr, "empty document\n");
-		xmlFreeDoc(doc);
-		return -EREMOTEIO;
+#define MAXKEYSTACK 20
+char *keystack[MAXKEYSTACK];
+
+static void json_parse_array(json_object *jobj, char *key, int nestlevel)
+{
+	enum json_type type;
+
+	nestlevel++;
+	/* Simply get the array */
+	json_object *jarray = jobj;
+	if (key) {
+		/* Get the array if it is a key value pair */
+		jarray = json_object_object_get(jobj, key);
 	}
 
-	if (xmlStrcmp(current->name, (const xmlChar *) "status")) {
-		if (xmlStrcmp(current->name, (const xmlChar *) "direct_message")) {
-			if (xmlStrcmp(current->name, (const xmlChar *) "hash")
-                        	&& xmlStrcmp(current->name, (const xmlChar *) "errors")) {
-				fprintf(stderr, "unexpected document type\n");
-				xmlFreeDoc(doc);
-				return -EREMOTEIO;
-			} else {
-				xmlChar *text=NULL;
-				while (current != NULL) {
-					if (current->type == XML_ELEMENT_NODE)
-						if (!xmlStrcmp(current->name, (const xmlChar *)"error")) {
-							text = xmlNodeListGetString(doc, current->xmlChildrenNode, 1);
-							break;
-						}
-					if (current->children)
-						current = current->children;
-					else
-						current = current->next;
-				}
+	/* Get the length of the array */
+	int arraylen = json_object_array_length(jarray);
+	if (debug)
+		printf("Array Length: %d\n",arraylen);
+	int i;
+	json_object *jvalue;
 
-				if (text) {
-					fprintf(stderr, "error condition detected = %s\n", text);
-					xmlFree(text);
-				} else
-					fprintf(stderr, "unknown error condition\n");
+	for (i = 0; i < arraylen; i++) {
+		if (debug) {
+			int j;
+			for (j=0; j < nestlevel; ++j)
+				printf("  ");
+			printf("element[%d]\n",i);
+		}
 
-				xmlFreeDoc(doc);
-				return -EREMOTEIO;
+		/* Get the array element at position i */
+		jvalue = json_object_array_get_idx(jarray, i);
+		type = json_object_get_type(jvalue);
+		if (type == json_type_array) {
+			json_parse_array(jvalue, NULL, nestlevel);
+		} else if (type != json_type_object) {
+			if (debug) {
+				printf("value[%d]: ", i);
+				print_json_value(jvalue,nestlevel);
 			}
+		} else {
+			/* printf("obj: "); */
+			keystack[nestlevel%MAXKEYSTACK]="[]";
+			json_parse(jvalue,nestlevel);
+		}
+	}
+}
+
+
+struct results {
+	int code;
+	char *message;
+} results;
+
+struct session *store_session;
+struct tweetdetail {
+	char *id;
+	char *text;
+	char *screen_name;
+	char *created_at;
+} tweetdetail;
+
+static void json_interpret(json_object *jobj, int nestlevel)
+{
+	if (nestlevel == 3 &&
+	    strcmp(keystack[1], "errors") == 0 &&
+	    strcmp(keystack[2], "[]") == 0) {
+		if (strcmp(keystack[3], "message") == 0) {
+			if (json_object_get_type(jobj) == json_type_string)
+				results.message = (char *)json_object_get_string(jobj);
+		}
+		if (strcmp(keystack[3], "code") == 0) {
+			if (json_object_get_type(jobj) == json_type_int)
+				results.code = json_object_get_int(jobj);
 		}
 	}
 
-	xmlFreeDoc(doc);
+	if (nestlevel >= 2 &&
+	    strcmp(keystack[1],"[]") == 0) {
+		if (strcmp(keystack[2], "created_at") == 0) {
+			if (debug)
+				printf("%s : %s\n", keystack[2], json_object_get_string(jobj));
+			tweetdetail.created_at = (char *)json_object_get_string(jobj);
+		}
+		if (strcmp(keystack[2], "text") == 0) {
+			if (debug)
+				printf("%s : %s\n", keystack[2], json_object_get_string(jobj));
+			tweetdetail.text = (char *)json_object_get_string(jobj);
+		}
+		if (strcmp(keystack[2], "id") == 0) {
+			if (debug)
+				printf("%s : %s\n", keystack[2], json_object_get_string(jobj));
+			tweetdetail.id = (char *)json_object_get_string(jobj);
+		}
+		if (nestlevel >= 3 &&
+		    strcmp(keystack[2], "user") == 0) {
+			if (strcmp(keystack[3], "screen_name") == 0) {
+				if (debug)
+					printf("%s->%s : %s\n", keystack[2], keystack[3], json_object_get_string(jobj));
+				tweetdetail.screen_name=(char *)json_object_get_string(jobj);
+				bti_output_line(store_session,
+						(xmlChar *)tweetdetail.screen_name,
+						(xmlChar *)tweetdetail.id,
+						(xmlChar *)tweetdetail.created_at,
+						(xmlChar *)tweetdetail.text);
+				}
+		}
+	}
+}
 
+/* Parsing the json object */
+static void json_parse(json_object * jobj, int nestlevel)
+{
+	int i;
+
+	if (jobj==NULL) {
+		fprintf(stderr,"jobj null\n");
+		return;
+	}
+	nestlevel++;
+	enum json_type type;
+	json_object_object_foreach_alt(jobj, key, val) {
+		/* work around pre10 */
+		if (val)
+			type = json_object_get_type(val);
+		else
+			type=json_type_null;
+		if (debug)
+			for (i = 0; i < nestlevel; ++i)
+				printf("  ");
+		if (debug)
+			printf("key %-34s ", key);
+		if (debug)
+			for (i = 0; i < 8 - nestlevel; ++i)
+				printf("  ");
+		switch (type) {
+		case json_type_boolean:
+		case json_type_double:
+		case json_type_int:
+		case json_type_string:
+			if (debug) print_json_value(val,nestlevel);
+			if (debug) for (i=0; i<nestlevel+1; ++i) printf("  ");
+			if (debug) printf("(");
+			if (debug) for (i=1; i<nestlevel; ++i) { printf("%s->",keystack[i]); }
+			if (debug) printf("%s)\n",key);
+			keystack[nestlevel%MAXKEYSTACK] = key;
+			json_interpret(val,nestlevel);
+			break;
+		case json_type_object:
+			if (debug) printf("json_type_object\n");
+			keystack[nestlevel%MAXKEYSTACK] = key;
+			json_parse(json_object_object_get(jobj, key), nestlevel);
+			break;
+		case json_type_array:
+			if (debug) printf("json_type_array, ");
+			keystack[nestlevel%MAXKEYSTACK] = key;
+			json_parse_array(jobj, key, nestlevel);
+			break;
+		case json_type_null:
+			if (debug) printf("null\n");
+			break;
+		default:
+			if (debug) printf("\n");
+			break;
+		}
+	}
+}
+
+static int parse_response_json(char *document, struct session *session)
+{
+	dbg("Got this json response:\n");
+	dbg("%s\n",document);
+
+	results.code=0;
+	results.message=NULL;
+	json_object *jobj = json_tokener_parse(document);
+
+	/* make global for now */
+	store_session = session;
+	if (!is_error(jobj)) {
+		/* guards against a json pre 0.10 bug */
+		json_parse(jobj,0);
+	}
+	if (results.code && results.message != NULL) {
+		if (debug)
+			printf("Got an error code:\n  code=%d\n  message=%s\n",
+				results.code, results.message);
+		fprintf(stderr, "error condition detected: %d = %s\n",
+			results.code, results.message);
+		return -EIO;
+	}
 	return 0;
+}
+
+static void parse_timeline_json(char *document, struct session *session)
+{
+	dbg("Got this json response:\n");
+	dbg("%s\n",document);
+	results.code = 0;
+	results.message = NULL;
+	json_object *jobj = json_tokener_parse(document);
+
+	/* make global for now */
+	store_session = session;
+	if (!is_error(jobj)) {
+		/* guards against a json pre 0.10 bug */
+		if (json_object_get_type(jobj)==json_type_array) {
+			json_parse_array(jobj, NULL, 0);
+		} else {
+			json_parse(jobj,0);
+		}
+	}
+	if (results.code && results.message != NULL) {
+		if (debug)
+			printf("Got an error code:\n  code=%d\n  message=%s\n",
+				results.code, results.message);
+		fprintf(stderr, "error condition detected: %d = %s\n",
+			results.code, results.message);
+	}
 }
 
 static size_t curl_callback(void *buffer, size_t size, size_t nmemb,
@@ -540,7 +744,7 @@ static int parse_osp_reply(const char *reply, char **token, char **secret)
 	char **rv = NULL;
 	rc = oauth_split_url_parameters(reply, &rv);
 	qsort(rv, rc, sizeof(char *), oauth_cmpstringp);
-	if (rc == 2 || rc == 4) {
+	if (rc == 2 || rc == 4 || rc == 5) {
 		if (!strncmp(rv[0], "oauth_token=", 11) &&
 		    !strncmp(rv[1], "oauth_token_secret=", 18)) {
 			if (token)
@@ -590,11 +794,6 @@ static int request_access_token(struct session *session)
 				twitter_request_token_uri, NULL,
 				OA_HMAC, NULL, session->consumer_key,
 				session->consumer_secret, NULL, NULL);
-	else if (session->host == HOST_IDENTICA)
-		request_url = oauth_sign_url2(
-				identica_request_token_uri, NULL,
-				OA_HMAC, NULL, session->consumer_key,
-				session->consumer_secret, NULL, NULL);
 	else {
 		sprintf(token_uri, "%s%s",
 			session->hosturl, custom_request_token_uri);
@@ -628,11 +827,6 @@ static int request_access_token(struct session *session)
 		verifier = session->readline(NULL);
 		sprintf(at_uri, "%s?oauth_verifier=%s",
 			twitter_access_token_uri, verifier);
-	} else if (session->host == HOST_IDENTICA) {
-		fprintf(stdout, "%s%s\nPIN: ", identica_authorize_uri, at_key);
-		verifier = session->readline(NULL);
-		sprintf(at_uri, "%s?oauth_verifier=%s",
-			identica_access_token_uri, verifier);
 	} else {
 		fprintf(stdout, "%s%s%s\nPIN: ",
 			session->hosturl, custom_authorize_uri, at_key);
@@ -761,15 +955,9 @@ static int send_request(struct session *session)
 			break;
 
 		case ACTION_PUBLIC:
-			snprintf(endpoint, endpoint_size, "%s%s?page=%d", session->hosturl,
-				public_uri, session->page);
-			curl_easy_setopt(curl, CURLOPT_URL, endpoint);
-			break;
-
-		case ACTION_GROUP:
-			snprintf(endpoint, endpoint_size, "%s%s%s.xml?page=%d",
-				session->hosturl, group_uri, session->group,
-				session->page);
+			/*snprintf(endpoint, endpoint_size, "%s%s?page=%d", session->hosturl,*/
+			snprintf(endpoint, endpoint_size, "%s%s", twitter_host_stream,
+				public_uri);
 			curl_easy_setopt(curl, CURLOPT_URL, endpoint);
 			break;
 
@@ -876,7 +1064,7 @@ static int send_request(struct session *session)
 			is_post = 1;
 			break;
 		case ACTION_USER:
-			sprintf(endpoint, "%s%s%s.xml?page=%d",
+			sprintf(endpoint, "%s%s?screen_name=%s&page=%d",
 				session->hosturl, user_uri, session->user,
 				session->page);
 			break;
@@ -885,13 +1073,8 @@ static int send_request(struct session *session)
 				mentions_uri, session->page);
 			break;
 		case ACTION_PUBLIC:
-			sprintf(endpoint, "%s%s?page=%d", session->hosturl,
-				public_uri, session->page);
-			break;
-		case ACTION_GROUP:
-			sprintf(endpoint, "%s%s%s.xml?page=%d",
-				session->hosturl, group_uri, session->group,
-				session->page);
+			sprintf(endpoint, "%s%s", twitter_host_stream,
+				public_uri);
 			break;
 		case ACTION_FRIENDS:
 			sprintf(endpoint, "%s%s?page=%d", session->hosturl,
@@ -930,26 +1113,25 @@ static int send_request(struct session *session)
 				reply = oauth_http_get(req_url, postarg);
 			}
 
-			dbg("%s\n", req_url);
-			dbg("%s\n", reply);
+			dbg("req_url:%s\n", req_url);
+			dbg("reply:%s\n", reply);
 			if (req_url)
 				free(req_url);
-		}
 
-		if (!reply) {
-			fprintf(stderr, "Error retrieving from URL (%s)\n", endpoint);
-			return -EIO;
-		}
+			if (!reply) {
+				fprintf(stderr, "Error retrieving from URL (%s)\n", endpoint);
+				return -EIO;
+			}
 
-		if (!session->dry_run) {
 			if ((session->action != ACTION_UPDATE) &&
 					(session->action != ACTION_RETWEET) &&
 					(session->action != ACTION_DIRECT))
-				parse_timeline(reply, session);
+				parse_timeline_json(reply, session);
 
 			if ((session->action == ACTION_UPDATE) ||
 					(session->action == ACTION_DIRECT))
-				return parse_response(reply, session);
+				/*return parse_response_xml(reply, session);*/
+				return parse_response_json(reply, session);
 		}
 
 		skip_tweet: ;
@@ -1000,10 +1182,6 @@ static void log_session(struct session *session, int retval)
 		break;
 	case ACTION_PUBLIC:
 		fprintf(log_file, "%s: host=%s retrieving public timeline\n",
-			session->time, session->hostname);
-		break;
-	case ACTION_GROUP:
-		fprintf(log_file, "%s: host=%s retrieving group timeline\n",
 			session->time, session->hostname);
 		break;
 	case ACTION_DIRECT:
@@ -1345,7 +1523,6 @@ int main(int argc, char *argv[], char *envp[])
 		{ "proxy", 1, NULL, 'P' },
 		{ "action", 1, NULL, 'A' },
 		{ "user", 1, NULL, 'u' },
-		{ "group", 1, NULL, 'G' },
 		{ "logfile", 1, NULL, 'L' },
 		{ "shrink-urls", 0, NULL, 's' },
 		{ "help", 0, NULL, 'h' },
@@ -1457,8 +1634,6 @@ int main(int argc, char *argv[], char *envp[])
 				session->action = ACTION_REPLIES;
 			else if (strcasecmp(optarg, "public") == 0)
 				session->action = ACTION_PUBLIC;
-			else if (strcasecmp(optarg, "group") == 0)
-				session->action = ACTION_GROUP;
 			else if (strcasecmp(optarg, "retweet") == 0)
 				session->action = ACTION_RETWEET;
 			else if (strcasecmp(optarg, "direct") == 0)
@@ -1474,12 +1649,6 @@ int main(int argc, char *argv[], char *envp[])
 			dbg("user = %s\n", session->user);
 			break;
 
-		case 'G':
-			if (session->group)
-				free(session->group);
-			session->group = strdup(optarg);
-			dbg("group = %s\n", session->group);
-			break;
 		case 'L':
 			if (session->logfile)
 				free(session->logfile);
@@ -1498,10 +1667,6 @@ int main(int argc, char *argv[], char *envp[])
 				session->host = HOST_TWITTER;
 				session->hosturl = strdup(twitter_host);
 				session->hostname = strdup(twitter_name);
-			} else if (strcasecmp(optarg, "identica") == 0) {
-				session->host = HOST_IDENTICA;
-				session->hosturl = strdup(identica_host);
-				session->hostname = strdup(identica_name);
 			} else {
 				session->host = HOST_CUSTOM;
 				session->hosturl = strdup(optarg);
@@ -1574,10 +1739,6 @@ int main(int argc, char *argv[], char *envp[])
 				goto exit;
 			}
 		}
-		if (session->action == ACTION_GROUP) {
-			fprintf(stderr, "Groups only work in Identi.ca.\n");
-			goto exit;
-		}
 	} else {
 		if (!session->consumer_key || !session->consumer_secret)
 			session->no_oauth = 1;
@@ -1604,13 +1765,8 @@ int main(int argc, char *argv[], char *envp[])
 
 	if (session->action == ACTION_UNKNOWN) {
 		fprintf(stderr, "Unknown action, valid actions are:\n"
-			"'update', 'friends', 'public', 'replies', 'group', 'user' or 'direct'.\n");
+			"'update', 'friends', 'public', 'replies', 'user' or 'direct'.\n");
 		goto exit;
-	}
-
-	if (session->action == ACTION_GROUP && !session->group) {
-		fprintf(stdout, "Enter group name: ");
-		session->group = session->readline(NULL);
 	}
 
 	if (session->action == ACTION_RETWEET) {
